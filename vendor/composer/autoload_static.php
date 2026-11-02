@@ -12,10 +12,6 @@ class ComposerStaticInit4e80a6983f766b15a6d351e931efd0f5
     );
 
     public static $prefixLengthsPsr4 = array (
-        's' =>
-        array (
-            'setasign\\Fpdi\\' => 14,
-        ),
         'S' =>
         array (
             'Svg\\' => 4,
@@ -41,10 +37,6 @@ class ComposerStaticInit4e80a6983f766b15a6d351e931efd0f5
     );
 
     public static $prefixDirsPsr4 = array (
-        'setasign\\Fpdi\\' =>
-        array (
-            0 => __DIR__ . '/..' . '/setasign/fpdi/src',
-        ),
         'Svg\\' =>
         array (
             0 => __DIR__ . '/..' . '/dompdf/php-svg-lib/src/Svg',

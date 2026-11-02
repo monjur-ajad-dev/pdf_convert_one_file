@@ -7,7 +7,6 @@
         }
     ],
     "require": {
-        "setasign/fpdi": "^2.6",
         "phpoffice/phpword": "^1.4",
         "dompdf/dompdf": "^3.1",
         "setasign/fpdf": "^1.9"

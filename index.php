@@ -110,6 +110,7 @@
   </div>
 </main>
 
+<script src="assets/pdf-lib.min.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 const drop = $('#drop'), input = $('#file'), list = $('#list');
@@ -193,21 +194,93 @@ list.addEventListener('drop', e => {
 
 clearBtn.onclick = () => { files.forEach(f => f.url && URL.revokeObjectURL(f.url)); files=[]; show('',''); render(); };
 
+/* ---------- merging happens here in the browser (pdf-lib) — every page becomes A4 ---------- */
+const A4 = {w: 595.28, h: 841.89};          // points (210 × 297 mm)
+
+function pageDims(orientation, boxW, boxH){  // decide portrait / landscape for one page
+  const land = orientation === 'landscape' || (orientation === 'auto' && boxW > boxH);
+  return land ? {w: A4.h, h: A4.w} : {w: A4.w, h: A4.h};
+}
+
+async function fileToPdfBytes(file){          // Word/Excel/PPT/TXT → PDF via the server
+  const fd = new FormData(); fd.append('file', file, file.name);
+  const res = await fetch('convert.php', {method: 'POST', body: fd});
+  if (!res.ok) {
+    let m = 'Server error ' + res.status;
+    try { m = (await res.json()).error || m; } catch(_) {}
+    throw new Error(m);
+  }
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+async function addPdf(out, bytes, orientation, label){
+  let src;
+  try { src = await PDFLib.PDFDocument.load(bytes); }
+  catch (e) {
+    try { src = await PDFLib.PDFDocument.load(bytes, {ignoreEncryption: true}); }
+    catch (e2) { throw new Error(`"${label}": cannot read this PDF (${e2.message}).`); }
+  }
+  const srcPages = src.getPages();
+  for (let i = 0; i < srcPages.length; i++) {
+    let ep = null;
+    if (srcPages[i].node.Contents()) ep = await out.embedPage(srcPages[i]);
+    if (!ep) {                                    // truly blank page (no content stream)
+      const sz = srcPages[i].getSize(), r90 = srcPages[i].getRotation().angle % 180 !== 0;
+      const P = pageDims(orientation, r90 ? sz.height : sz.width, r90 ? sz.width : sz.height);
+      out.addPage([P.w, P.h]); continue;
+    }
+    const rot = ((srcPages[i].getRotation().angle % 360) + 360) % 360;
+    const swap = rot === 90 || rot === 270;
+    const eW = swap ? ep.height : ep.width, eH = swap ? ep.width : ep.height;   // as displayed
+    const P = pageDims(orientation, eW, eH);
+    const s = Math.min(P.w / eW, P.h / eH);
+    const w = ep.width * s, h = ep.height * s;                                 // drawn size (unrotated)
+    const dw = swap ? h : w, dh = swap ? w : h;                                // displayed size
+    const ox = (P.w - dw) / 2, oy = (P.h - dh) / 2;
+    const origin = {0: [ox, oy], 90: [ox, oy + w], 180: [ox + w, oy + h], 270: [ox + h, oy]}[rot] || [ox, oy];
+    const page = out.addPage([P.w, P.h]);
+    page.drawPage(ep, {x: origin[0], y: origin[1], width: w, height: h, rotate: PDFLib.degrees(-rot)});
+  }
+}
+
+async function addImage(out, file, orientation){
+  const bmp = await createImageBitmap(file);   // honours phone-photo rotation
+  const MAX = 4000, k = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+  const cw = Math.round(bmp.width * k), ch = Math.round(bmp.height * k);
+  const c = document.createElement('canvas'); c.width = cw; c.height = ch;
+  const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, cw, ch); g.drawImage(bmp, 0, 0, cw, ch);
+  bmp.close && bmp.close();
+  const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.93));
+  const img = await out.embedJpg(new Uint8Array(await blob.arrayBuffer()));
+  const P = pageDims(orientation, cw, ch), M = 28;                            // 28 pt ≈ 10 mm margin
+  const s = Math.min((P.w - 2*M) / cw, (P.h - 2*M) / ch);
+  const w = cw * s, h = ch * s;
+  out.addPage([P.w, P.h]).drawImage(img, {x: (P.w - w) / 2, y: (P.h - h) / 2, width: w, height: h});
+}
+
+async function mergeAll(list, orientation, progress){
+  const out = await PDFLib.PDFDocument.create();
+  out.setTitle('Merged document');
+  for (let i = 0; i < list.length; i++) {
+    const f = list[i], e = ext(f.name);
+    progress(i + 1, list.length, f.name);
+    if (e === 'pdf') await addPdf(out, new Uint8Array(await f.arrayBuffer()), orientation, f.name);
+    else if (['png','jpg','jpeg','gif','webp','bmp'].includes(e)) {
+      try { await addImage(out, f, orientation); }
+      catch (err) { throw new Error(`"${f.name}": cannot read this image.`); }
+    } else await addPdf(out, await fileToPdfBytes(f), orientation, f.name);
+  }
+  return await out.save();
+}
+
 mergeBtn.onclick = async () => {
   if (!files.length) return;
-  const fd = new FormData();
-  files.forEach(f => fd.append('files[]', f.file, f.file.name));
-  const orientEl = $('#orientation');
-  if (orientEl) fd.append('orientation', orientEl.value);
-  mergeBtn.disabled = true; mergeBtn.innerHTML = '<span class="spin"></span>Merging…'; show('', '');
+  const orientation = $('#orientation').value;
+  mergeBtn.disabled = true; show('', '');
   try {
-    const res = await fetch('merge.php', {method:'POST', body: fd});
-    if (!res.ok) {
-      let m = 'Server error ' + res.status;
-      try { m = (await res.json()).error || m; } catch(_){}
-      throw new Error(m);
-    }
-    const blob = await res.blob();
+    const bytes = await mergeAll(files.map(f => f.file), orientation,
+      (i, n, name) => { mergeBtn.innerHTML = `<span class="spin"></span>Merging ${i}/${n}…`; });
+    const blob = new Blob([bytes], {type: 'application/pdf'});
     if (lastUrl) URL.revokeObjectURL(lastUrl);
     lastUrl = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = lastUrl; a.download = 'merged.pdf'; a.click();
